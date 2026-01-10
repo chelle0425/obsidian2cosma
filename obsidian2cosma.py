@@ -29,6 +29,7 @@ import re
 import shutil
 import csv
 import unicodedata
+import yaml
 from datetime import datetime as dt
 from pathlib import Path
 
@@ -105,37 +106,19 @@ def create_id(file) -> str:
     return currentId
 
 def parse_yaml_front_matter(content):
-  """Parses YAML front matter from a Markdown file."""
-  match = re.match(r"^---\n(.*?)\n---(.*)", content, re.DOTALL)
-  if match:
+    """Parses YAML front matter from a Markdown file."""
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)", content, re.DOTALL)
+    if not match:
+        return {}, content
+
     front_matter = match.group(1)
-    content = match.group(2)
-    data = {}
-    for line in front_matter.split("\n"):
-      key_value = line.split(": ")
-      if len(key_value) < 2:
-        continue
-      key, value = key_value
-      # Parse values as integers or floats if possible, otherwise keep as string
-      try:
-        value = int(value)
-      except ValueError:
-        try:
-          value = float(value)
-        except ValueError:
-          pass
-      # Convert the tags field to a list if necessary
-      if key == "tags":
-        if isinstance(value, str):
-          # Remove the brackets from the string
-          value = value.strip("[]")
-          # Split the string on commas and store the resulting list of tags
-          value = value.split(",")
-          # Strip any leading or trailing whitespace from each tag
-          value = [tag.strip() for tag in value]
-      data[key] = value
-    return data, content
-  return {}, content
+    body = match.group(2)
+
+    data = yaml.safe_load(front_matter)
+    if data is None:
+        data = {}
+
+    return data, body
 
 def filter_files(root, files, type=None, tags=None):
   """Filters a list of Markdown files based on the given type and tags, and images."""
