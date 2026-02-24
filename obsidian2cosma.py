@@ -6,6 +6,7 @@ Usage: python obsidian2cosma.py -i input_folder_path -o output_folder_path
                                 [--creationdate CREATIONDATE] 
                                 [--verbose]
                                 [--reformatproperties][--folder2type]
+                                [--configout CONFIGOUT]
 
 Optional arguments:
   --h, --help                           Show this help message
@@ -17,6 +18,8 @@ Optional arguments:
   --v, --verbose                        Print changes in the terminal
   --r, --reformatproperties             Normalize YAML front matter keys/values for Cosma (lowercase keys, underscore spaces, quote strings etc)
   --f2t, --folder2type                  Add the name of the folder path of the note as a type tag
+  --configout CONFIGOUT                 Folder to write _cosma_config_hint.txt (defaults to output folder)
+
 Author: Kévin Polisano 
 Contact: kevin.polisano@cnrs.fr
 
@@ -53,7 +56,7 @@ parser.add_argument("-r", "--reformatproperties", action='store_true',
                     help="Normalize YAML front matter keys/values for Cosma (lowercase keys, underscore spaces, quote strings etc)")
 parser.add_argument("-f2t", "--folder2type", action='store_true',
                     help="Add the name of the folder path of the note as a type tag")
-
+parser.add_argument("--configout", help="Folder to write _cosma_config_hint.txt (defaults to output folder)", default=None)
 # Parse the command line arguments
 args = parser.parse_args()
 
@@ -452,8 +455,100 @@ def rename_file(file):
   new_name = unicodedata.normalize("NFD", file).encode("ascii", "ignore").decode("utf-8")
   # Replace spaces with hyphens
   new_name = new_name.replace(" ", "-")
+  new_name = new_name.replace("&", "and")
   # Write the new filename
   os.rename(file, new_name)
+
+def collect_metadata_summary(files):
+  """
+  Collect all unique YAML front matter keys (excluding Cosma internals)
+  and all unique 'type' values across all processed files.
+  Returns (sorted_keys_list, sorted_types_list).
+
+  This should isolate record_metas by skipping id, title, type, tags.
+  """
+  SKIP_KEYS = {"id", "title", "type", "tags"}
+  all_keys = set()
+  all_types = set()
+
+  for file in files:
+    with open(file, "r", encoding="utf-8") as f:
+      content = f.read()
+    front_matter, _ = parse_yaml_front_matter(content)
+    for k in front_matter.keys():
+      # no need to clean as we are running this after reformatting
+      if k not in SKIP_KEYS:
+        all_keys.add(k)
+    t = front_matter.get("type")
+    if t:
+      if isinstance(t, str):
+        all_types.add(t.strip())
+      elif isinstance(t, list):
+        for item in t:
+          all_types.add(str(item).strip())
+
+  return sorted(all_keys), sorted(all_types)
+
+def write_cosma_config_hint(files):
+  """
+  Write _cosma_config_hint.txt to the output folder with:
+  - record_metas: list of all custom YAML property keys found
+  - record_types: list of all type values found, with placeholder fill/stroke colors
+  """
+  printv("\n=== Writing Cosma config hint ===\n")
+
+  all_keys, all_types = collect_metadata_summary(files)
+
+  lines = []
+
+  # record_metas block
+  if all_keys:
+    lines.append("record_metas: [{}]".format(", ".join(all_keys)))
+  else:
+    lines.append("record_metas: []")
+
+  lines.append("")
+
+  # record_types block
+  lines.append("record_types:")
+
+  # Always include 'undefined' first as a safe default
+  if "undefined" not in all_types:
+    all_types_with_default = ["undefined"] + list(all_types)
+  else:
+    all_types_with_default = list(all_types)
+    all_types_with_default.remove("undefined")
+    all_types_with_default = ["undefined"] + all_types_with_default
+
+  # A small palette to cycle through for non-undefined types
+  PALETTE = [
+    ("#fff799", "#fff799"),
+    ("#b3e5fc", "#b3e5fc"),
+    ("#c8e6c9", "#c8e6c9"),
+    ("#ffccbc", "#ffccbc"),
+    ("#e1bee7", "#e1bee7"),
+    ("#f8bbd0", "#f8bbd0"),
+    ("#d7ccc8", "#d7ccc8"),
+    ("#cfd8dc", "#cfd8dc"),
+  ]
+
+  for i, t in enumerate(all_types_with_default):
+    if t == "undefined":
+      fill = "#5c5c5c"
+      stroke = "#5c5c5c"
+    else:
+      fill, stroke = PALETTE[(i - 1) % len(PALETTE)]
+    lines.append("  {}:".format(t))
+    lines.append('    fill: "{}"'.format(fill))
+    lines.append('    stroke: "{}"'.format(stroke))
+
+  config_dir = args.configout if args.configout else output_folder
+  output_path = os.path.join(config_dir, "_cosma_config_hint.txt")
+
+  with open(output_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+
+  printv("Cosma config hint written to {}".format(output_path))
 
 def main():
   # If the output folder does not exist, then create one
@@ -489,6 +584,9 @@ def main():
     # Transform typed links as "- prefix [[destination]]" into the format "[[prefix:destination]]"
     if args.typedlinks:
       transform_typed_links(file)
+
+  # Write Cosma config hint file with collected metadata keys and types
+  write_cosma_config_hint(files)
 
   # Rename files by removing accents and replacing spaces with hyphens
   for file in files:
