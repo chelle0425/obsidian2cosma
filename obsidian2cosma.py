@@ -4,7 +4,8 @@ Usage: python obsidian2cosma.py -i input_folder_path -o output_folder_path
                                 [--type TYPE] [--tags TAGS]
                                 [--typedlinks TYPEDLINKS] [--semanticsection SEMANTICSECTION]
                                 [--creationdate CREATIONDATE] 
-                                [--verbose][--reformatproperties]
+                                [--verbose]
+                                [--reformatproperties][--folder2type]
 
 Optional arguments:
   --h, --help                           Show this help message
@@ -15,7 +16,7 @@ Optional arguments:
   --creationdate CREATIONDATE           Fill ID with file creation date if CREATIONDATE=True (e.g --creationdate True)
   --v, --verbose                        Print changes in the terminal
   --r, --reformatproperties             Normalize YAML front matter keys/values for Cosma (lowercase keys, underscore spaces, quote strings etc)
-  
+  --f2t, --folder2type                  Add the name of the folder path of the note as a type tag
 Author: Kévin Polisano 
 Contact: kevin.polisano@cnrs.fr
 
@@ -50,7 +51,8 @@ parser.add_argument("--zettlr", help="Use Zettlr syntax for wiki-links if ZETTLR
 parser.add_argument("-v", "--verbose", action='store_true', help='Print changes in the terminal')
 parser.add_argument("-r", "--reformatproperties", action='store_true',
                     help="Normalize YAML front matter keys/values for Cosma (lowercase keys, underscore spaces, quote strings etc)")
-
+parser.add_argument("-f2t", "--folder2type", action='store_true',
+                    help="Add the name of the folder path of the note as a type tag")
 
 # Parse the command line arguments
 args = parser.parse_args()
@@ -239,8 +241,12 @@ def filter_files(root, files, type=None, tags=None):
   return filtered_files
 
 def copy_and_filter_files(input_folder, output_folder):
-  """Function to copy all Markdown files and images from the input folder and its subfolders to the output folder"""
+  """
+  Function to copy all Markdown files and images from the input folder and its subfolders to the output folder
+  Modified to support --folder2type by returning a dict of filename: folder path
+  """
   printv("\n=== Filtering files and copying them in the output folder ===\n")
+  file_to_folder = {}
   for root, dirs, files in os.walk(input_folder):
     # Ignore subfolders that start with an underscore
     dirs[:] = [d for d in dirs if not d.startswith("_")]
@@ -250,7 +256,47 @@ def copy_and_filter_files(input_folder, output_folder):
       # Copy current file from the input folder to output folder
       shutil.copy2(os.path.join(root, file), output_folder) # copy2() preserve access and modifications dates
       copy_system_birthtime(os.path.join(root, file), os.path.join(output_folder, file)) # but birthtime (= creation date) has to be set up manually
-  
+      if file.endswith(".md"): # redundant?
+        rel_folder = os.path.relpath(root, input_folder)
+
+        if rel_folder != ".":  # if file is in root
+          file_to_folder[file] = rel_folder
+
+  return file_to_folder
+
+def folder_path_to_type(folder_path: str) -> str:
+  """
+  Convert a folder path to str
+  E.g. Characters/Player Characters to 'characters/player-characters'
+  """
+  parts = Path(folder_path).parts
+  return "/".join(part.lower().replace(" ", "-") for part in parts)
+
+def apply_folder2type(files, file_to_folder):
+  """Include folder path as the 'type' field."""
+  printv("\n=== Applying folder paths as type metadata ===\n")
+  for file in files:
+    filename = os.path.basename(file)
+    if filename not in file_to_folder:
+      continue  # File is in the root folder, skip
+
+    type_value = folder_path_to_type(file_to_folder[filename])
+    with open(file, "r", encoding="utf-8") as f:
+      content = f.read()
+    front_matter, body = parse_yaml_front_matter(content)
+
+    # Insert type into front matter
+    match = re.match(r"^---\s*\n", content)
+    if match:
+      content = content.replace("---", f"---\ntype: {type_value}", 1)
+    else:
+      content = f"---\ntype: {type_value}\n---\n" + content
+
+    with open(file, "w", encoding="utf-8") as f:
+      f.write(content)
+
+    printv(f"{filename} has type: {type_value}")
+
 def metadata_init(files) -> dict:
   """Function to initialize metadata and save them in a csv file
   Find (or create) the title and id fields in the YAML frontmatter of all Markdown files
@@ -414,19 +460,23 @@ def main():
   Path(output_folder).mkdir(parents=True, exist_ok=True)
 
   # Copy all Markdown files and images from the input folder and subfolders to the output folder
-  copy_and_filter_files(input_folder, output_folder)
+  file_to_folder = copy_and_filter_files(input_folder, output_folder)
 
   # Store the list of Markdown files within the output folder
   filenames = [file for file in os.listdir(output_folder) if file.endswith(".md")]
   files = [os.path.join(output_folder, file) for file in filenames]
 
-  # Optionally reformat YAML headers for Cosma
+  # Option --reformatproperties to reformat YAML headers for Cosma
   if args.reformatproperties:
     printv("\n=== Reformatting YAML front matter headers ===\n")
     for file in files:
       changed = reformat_yaml_front_matter_in_file(file)
       if changed:
-        printv(f"[REFORMATTED] {os.path.basename(file)}")
+        printv(f"Reformatted {os.path.basename(file)}")
+
+  # Option --folder2type 
+  if args.folder2type:
+    apply_folder2type(files, file_to_folder)
 
   # Initialize YAML metadata of the selected files, fill a dictionary title -> id and save it into a csv file
   title2id = metadata_init(files)
