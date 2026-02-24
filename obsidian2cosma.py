@@ -4,7 +4,7 @@ Usage: python obsidian2cosma.py -i input_folder_path -o output_folder_path
                                 [--type TYPE] [--tags TAGS]
                                 [--typedlinks TYPEDLINKS] [--semanticsection SEMANTICSECTION]
                                 [--creationdate CREATIONDATE] 
-                                [--verbose]
+                                [--verbose][--reformatproperties]
 
 Optional arguments:
   --h, --help                           Show this help message
@@ -14,13 +14,15 @@ Optional arguments:
   --semanticsection SEMANTICSECTION     Specify in which section typed links are (e.g --semanticsection "## Typed links")
   --creationdate CREATIONDATE           Fill ID with file creation date if CREATIONDATE=True (e.g --creationdate True)
   --v, --verbose                        Print changes in the terminal
-
+  --r, --reformatproperties             Normalize YAML front matter keys/values for Cosma (lowercase keys, underscore spaces, quote strings etc)
+  
 Author: Kévin Polisano 
 Contact: kevin.polisano@cnrs.fr
 
 License: GNU General Public License v3.0
 
 """
+
 
 import os
 import platform
@@ -46,6 +48,9 @@ parser.add_argument("--semanticsection", help="Specify in which section typed li
 parser.add_argument("--creationdate", help="Fill ID with file creation date if CREATIONDATE=True (e.g --creationdate True)", default=False)
 parser.add_argument("--zettlr", help="Use Zettlr syntax for wiki-links if ZETTLR=True", default=False)
 parser.add_argument("-v", "--verbose", action='store_true', help='Print changes in the terminal')
+parser.add_argument("-r", "--reformatproperties", action='store_true',
+                    help="Normalize YAML front matter keys/values for Cosma (lowercase keys, underscore spaces, quote strings etc)")
+
 
 # Parse the command line arguments
 args = parser.parse_args()
@@ -119,6 +124,68 @@ def parse_yaml_front_matter(content):
         data = {}
 
     return data, body
+
+def _normalize_key(key: str) -> str:
+    """Lowercase key and replace spaces with underscores."""
+    return key.strip().lower().replace(" ", "_")
+
+class _QuotedStr(str):
+    """Marker type to force double quotes in YAML output."""
+    pass
+
+def _quoted_str_representer(dumper, data):
+    # Always emit as a double-quoted YAML string
+    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data), style='"')
+
+# Register representer so yaml.safe_dump will quote _QuotedStr
+yaml.add_representer(_QuotedStr, _quoted_str_representer, Dumper=yaml.SafeDumper)
+
+def _normalize_value(val):
+    """
+    - None -> []
+    - strings -> force double quotes in YAML output
+    - keep lists/dicts, but recurse
+    """
+    if val is None:
+        return []
+    if isinstance(val, str):
+        s = val.strip()
+        # If it's an empty string, treat like empty property
+        if s == "":
+            return []
+        return _QuotedStr(s)
+    if isinstance(val, list):
+        return [_normalize_value(v) for v in val]
+    if isinstance(val, dict):
+        return { _normalize_key(str(k)): _normalize_value(v) for k, v in val.items() }
+    return val
+
+def reformat_yaml_front_matter_in_file(file: str) -> bool:
+    """
+    Rewrites YAML front matter.
+    Returns True if a YAML block was found and rewritten.
+    """
+    with open(file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    data, body = parse_yaml_front_matter(content)
+    if data == {} and body == content:
+        # No YAML front matter present
+        return False
+
+    new_data = {}
+    for k, v in data.items():
+        nk = _normalize_key(str(k))
+        new_data[nk] = _normalize_value(v)
+
+    # Dump YAML back (keep order-ish, avoid sorting)
+    new_front = yaml.safe_dump(new_data, sort_keys=False, allow_unicode=True).rstrip()
+
+    new_content = f"---\n{new_front}\n---\n{body.lstrip()}"
+    with open(file, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    return True
 
 def filter_files(root, files, type=None, tags=None):
   """Filters a list of Markdown files based on the given type and tags, and images."""
@@ -352,6 +419,14 @@ def main():
   # Store the list of Markdown files within the output folder
   filenames = [file for file in os.listdir(output_folder) if file.endswith(".md")]
   files = [os.path.join(output_folder, file) for file in filenames]
+
+  # Optionally reformat YAML headers for Cosma
+  if args.reformatproperties:
+    printv("\n=== Reformatting YAML front matter headers ===\n")
+    for file in files:
+      changed = reformat_yaml_front_matter_in_file(file)
+      if changed:
+        printv(f"[REFORMATTED] {os.path.basename(file)}")
 
   # Initialize YAML metadata of the selected files, fill a dictionary title -> id and save it into a csv file
   title2id = metadata_init(files)
